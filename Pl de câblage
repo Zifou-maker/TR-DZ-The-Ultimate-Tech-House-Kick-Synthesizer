@@ -1,0 +1,61 @@
+graph TD
+    subgraph POWER [Alimentation]
+        USB[USB PC/Mac] -->|5V & Data| USB_PORT[Port USB Daisy]
+        GND_MAIN[GND Commun]
+    end
+
+    subgraph DAISY [Daisy Seed v1.1]
+        P12[Pin 12 - SCL]
+        P13[Pin 13 - SDA]
+        P18[Pin 18 - Audio OUT L]
+        P19[Pin 19 - Audio OUT R]
+        P22[Pin 22 - ADC0]
+        P23[Pin 23 - ADC1]
+        P35[Pin 35 - D28]
+        DGND[Pin 40 - DGND]
+        AGND[Pin 20 - AGND]
+        V33[Pin 38 - 3V3 Out]
+    end
+
+    subgraph SCREEN [Écran OLED SH1106]
+        O_VCC[VCC]
+        O_GND[GND]
+        O_SCL[SCL]
+        O_SDA[SDA]
+    end
+
+    subgraph AUDIO_OUT [Sortie Audio Jack 6.35]
+        JACK_L[Jack Tip Gauche]
+        JACK_R[Jack Tip Droite]
+        JACK_GND[Jack Sleeve / Masse]
+    end
+
+    subgraph CONTROLS [Contrôles]
+        POT1[Potentiomètre BPM 10k]
+        POT2[Potentiomètre Cutoff 10k]
+        BTN1[Bouton Test / Kick]
+    end
+
+    %% Connexions Écran
+    V33 --> O_VCC
+    DGND --> O_GND
+    P12 --> O_SCL
+    P13 --> O_SDA
+
+    %% Connexions Audio
+    P18 --> JACK_L
+    P19 --> JACK_R
+    AGND --> JACK_GND
+
+    %% Connexions Potentiomètres
+    V33 --> POT1
+    DGND --> POT1
+    P22 -->|Wiper/Milieu| POT1
+
+    V33 --> POT2
+    DGND --> POT2
+    P23 -->|Wiper/Milieu| POT2
+
+    %% Connexions Bouton
+    P35 --> BTN1
+    BTN1 --> DGND
