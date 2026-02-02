@@ -1,11 +1,14 @@
 /* -------------------------------------------------------
-   TR-DZ V11 - FULL INTEGRATED EDITION
+   TR-DZ V11 - GLOBAL EDITION (Full English)
    -------------------------------------------------------
    Hardware: 
    - Daisy Seed v1.1
    - CD74HC4067 Multiplexer (S0:D0, S1:D1, S2:D2, S3:D3, SIG:A0)
-   - Ecran OLED SH1106 (I2C)
-   - Bouton Step: Pin 28
+   - OLED Display SH1106 (I2C)
+   - Step Button: Pin 28
+   -------------------------------------------------------
+   Firmware Version: 1.1.0
+   Description: Integrated Kick/Bass engine with Native Sidechain.
    -------------------------------------------------------
 */
 
@@ -15,22 +18,22 @@
 
 using namespace daisysp;
 
-// --- CONFIGURATION ECRAN ---
+// --- DISPLAY CONFIGURATION ---
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
-// --- CONFIGURATION PINS MUX ---
+// --- MULTIPLEXER PINS CONFIGURATION ---
 const int MUX_S0 = 0;
 const int MUX_S1 = 1;
 const int MUX_S2 = 2;
 const int MUX_S3 = 3;
 const int MUX_SIG = A0; 
 
-#define PIN_BOT_TEST 28
+#define PIN_STEP_BUTTON 28
 
 static DaisyHardware hw;
 static Metro         metro;
 
-// --- MODULES AUDIO ---
+// --- AUDIO MODULES ---
 static Oscillator    osc_kick;
 static AdEnv         env_amp_kick, env_pitch_kick;
 static Svf           filt_kick; 
@@ -48,7 +51,7 @@ static Oscillator    osc_bass;
 static AdEnv         env_bass;
 static Svf           filt_bass;
 
-// --- VARIABLES GLOBALES ---
+// --- GLOBAL VOLATILE VARIABLES ---
 volatile float current_bpm = 120.0f;
 volatile float current_cutoff = 1000.0f;
 volatile float current_swing = 0.05f;
@@ -57,35 +60,35 @@ volatile float current_kick_decay = 0.4f;
 volatile int   current_step = 0;
 volatile float peak_level = 0.0f; 
 
-// Séquences par défaut
+// Default Sequences
 bool seq_kick[16]  = {true, false, false, false, true, false, false, false, true, false, false, false, true, false, false, false};
 bool seq_hat[16]   = {false, false, true, false, false, false, true, false, false, false, true, false, false, false, true, false};
 bool seq_snare[16] = {false, false, false, false, true, false, false, false, false, false, false, false, true, false, false, false};
-int seq_bass[16]   = {0, 0, 1, 0, 0, 1, 0, 2, 0, 0, 1, 0, 0, 1, 2, 0};
+int  seq_bass[16]  = {0, 0, 1, 0, 0, 1, 0, 2, 0, 0, 1, 0, 0, 1, 2, 0};
 
 unsigned long button_timer = 0;
 bool last_button_state = HIGH;
 bool is_long_press = false;
 
-// --- FONCTION LECTURE MULTIPLEXEUR ---
+// --- MULTIPLEXER READ FUNCTION ---
 float readMux(int channel) {
   digitalWrite(MUX_S0, (channel & 1) ? HIGH : LOW);
   digitalWrite(MUX_S1, (channel & 2) ? HIGH : LOW);
   digitalWrite(MUX_S2, (channel & 4) ? HIGH : LOW);
   digitalWrite(MUX_S3, (channel & 8) ? HIGH : LOW);
-  delayMicroseconds(15); // Temps de stabilisation
+  delayMicroseconds(15); // Signal stabilization time
   return analogRead(MUX_SIG) / 1023.0f;
 }
 
-// --- AUDIO CALLBACK (LE MOTEUR DSP) ---
+// --- AUDIO CALLBACK (DSP ENGINE) ---
 void MyCallback(float **in, float **out, size_t size) {
     float base_freq = (current_bpm / 60.0f) * 4.0f;
 
-    // Gestion du Swing
+    // Swing Management
     if (current_step % 2 != 0) metro.SetFreq(base_freq * (1.0f - current_swing)); 
     else metro.SetFreq(base_freq * (1.0f + current_swing)); 
     
-    // Mises à jour des paramètres temps réel
+    // Real-time Parameter Updates
     filt_kick.SetFreq(current_cutoff); 
     env_amp_kick.SetTime(ADENV_SEG_DECAY, current_kick_decay);
     float bass_freq_target = current_cutoff;
@@ -93,31 +96,35 @@ void MyCallback(float **in, float **out, size_t size) {
     float temp_peak = 0.0f;
 
     for (size_t i = 0; i < size; i++) {
-        // Séquenceur (Horloge)
+        // --- SEQUENCER CLOCK ---
         if (metro.Process()) {
             current_step = (current_step + 1) % 16;
+            
             if (seq_kick[current_step]) { env_amp_kick.Trigger(); env_pitch_kick.Trigger(); }
             if (seq_hat[current_step])  { env_hat.Trigger(); }
             if (seq_snare[current_step]){ env_snare_tone.Trigger(); env_snare_noise.Trigger(); }
+            
             if (seq_bass[current_step] > 0) {
                 env_bass.Trigger();
-                if(seq_bass[current_step] == 1) osc_bass.SetFreq(55.0f); // Note A1
-                if(seq_bass[current_step] == 2) osc_bass.SetFreq(110.0f); // Note A2
+                if(seq_bass[current_step] == 1) osc_bass.SetFreq(55.0f); // A1 note
+                if(seq_bass[current_step] == 2) osc_bass.SetFreq(110.0f); // A2 note
             }
         }
         
-        // 1. KICK (Synthèse)
-        float kick_env_vol = env_amp_kick.Process();
+        // --- SYNTHESIS & NATIVE SIDECHAIN ---
+        
+        // 1. KICK (Core Trigger)
+        float kick_env_val = env_amp_kick.Process();
         osc_kick.SetFreq(40.0f + (env_pitch_kick.Process() * 160.0f));
-        float sig_kick = osc_kick.Process() * kick_env_vol;
+        float sig_kick = osc_kick.Process() * kick_env_val;
         filt_kick.Process(sig_kick);
         sig_kick = filt_kick.Low(); 
         
-        // 2. SIDECHAIN LOGIC (L'interaction)
-        // La basse baisse de volume proportionnellement à l'enveloppe du Kick
+        // 2. DUCKING FACTOR (The Sidechain Heart)
+        // Bass volume drops inversely to the Kick envelope
         float sidechain_depth = 0.95f; 
-        float ducking = 1.0f - (kick_env_vol * sidechain_depth);
-        if(ducking < 0.0f) ducking = 0.0f;
+        float ducking_factor = 1.0f - (kick_env_val * sidechain_depth);
+        if(ducking_factor < 0.0f) ducking_factor = 0.0f;
 
         // 3. SNARE & HATS
         float sig_hat = noise_hat.Process() * env_hat.Process();
@@ -130,17 +137,19 @@ void MyCallback(float **in, float **out, size_t size) {
         filt_snare.Process(sig_snare_noise);
         float sig_snare_mix = (sig_snare_tone * 0.5f) + (filt_snare.Band() * 0.8f);
 
-        // 4. BASS (Avec Ducking)
+        // 4. BASS (With Applied Sidechain)
         float raw_bass = osc_bass.Process();
         float env_v_bass = env_bass.Process();
         filt_bass.SetFreq(bass_freq_target + (env_v_bass * 500.0f)); 
         filt_bass.Process(raw_bass);
-        float sig_bass = (filt_bass.Low() * env_v_bass) * ducking;
+        
+        // Applying the pump effect:
+        float sig_bass = (filt_bass.Low() * env_v_bass) * ducking_factor;
 
-        // 5. MIXAGE FINAL
+        // 5. MASTER MIXER
         float final_mix = sig_kick + (sig_bass * 0.6f) + (sig_snare_mix * 0.35f) + (sig_hat * 0.15f);
         
-        // Soft Clipping de sécurité
+        // Safety Output Limiter (Hard Clipping)
         if(final_mix > 0.95f) final_mix = 0.95f;
         if(final_mix < -0.95f) final_mix = -0.95f;
 
@@ -151,25 +160,26 @@ void MyCallback(float **in, float **out, size_t size) {
 }
 
 void setup() {
+    // Hardware Init
     hw = DAISY.init(DAISY_SEED, AUDIO_SR_48K);
     float sr = DAISY.get_samplerate();
     
-    // Config Écran & I2C
+    // Display & I2C Init
     Wire.setClock(400000); 
     u8g2.begin();
     
-    // Config Pins Multiplexeur
+    // GPIO Config
     pinMode(MUX_S0, OUTPUT);
     pinMode(MUX_S1, OUTPUT);
     pinMode(MUX_S2, OUTPUT);
     pinMode(MUX_S3, OUTPUT);
-    pinMode(PIN_BOT_TEST, INPUT_PULLUP);
+    pinMode(PIN_STEP_BUTTON, INPUT_PULLUP);
 
-    // Initialisation Oscillateurs & Enveloppes
+    // Audio Engines Initialization
     osc_kick.Init(sr); osc_kick.SetWaveform(Oscillator::WAVE_SIN); 
     env_amp_kick.Init(sr); env_amp_kick.SetTime(ADENV_SEG_DECAY, 0.4f);
     env_pitch_kick.Init(sr); env_pitch_kick.SetTime(ADENV_SEG_DECAY, 0.05f);
-    filt_kick.Init(sr); filt_kick.SetRes(0.6f);
+    filt_kick.Init(sr); filt_kick.SetRes(0.7f);
 
     noise_hat.Init(); env_hat.Init(sr); env_hat.SetTime(ADENV_SEG_DECAY, 0.06f);
     filt_hat.Init(sr); filt_hat.SetRes(0.5f);
@@ -181,56 +191,61 @@ void setup() {
 
     osc_bass.Init(sr); osc_bass.SetWaveform(Oscillator::WAVE_POLYBLEP_SQUARE);
     env_bass.Init(sr); env_bass.SetTime(ADENV_SEG_ATTACK, 0.01f); env_bass.SetTime(ADENV_SEG_DECAY, 0.15f);
-    filt_bass.Init(sr); filt_bass.SetRes(0.5f);
+    filt_bass.Init(sr); filt_bass.SetRes(0.6f);
 
     metro.Init(2.0f, sr);
     DAISY.begin(MyCallback);
 }
 
 void loop() {
-    // --- LECTURE POTENTIOMETRES VIA MUX ---
+    // --- MULTIPLEXER SAMPLING ---
+    
+    // Channel 0: BPM Control
     current_bpm = 60.0f + (readMux(0) * 140.0f);
-    current_cutoff = 20.0f + (readMux(1) * 10000.0f);
+    
+    // Channel 1: Filter Cutoff
+    current_cutoff = 20.0f + (readMux(1) * 12000.0f);
+    
+    // Channel 2: Swing
     current_swing = readMux(2) * 0.25f; 
-    current_kick_decay = 0.05f + (readMux(3) * 0.8f);
+    
+    // Channel 3: Kick Decay
+    current_kick_decay = 0.1f + (readMux(3) * 1.0f);
 
-    // --- GESTION BOUTON STEP ---
-    bool btn = !digitalRead(PIN_BOT_TEST); // Inversé car Pullup
-    if (btn && last_button_state == LOW) {
-        button_timer = millis();
-        is_long_press = false;
-    }
+    // --- STEP BUTTON LOGIC ---
+    bool btn = !digitalRead(PIN_STEP_BUTTON); // Inverted due to Pullup
+    if (btn && last_button_state == LOW) { button_timer = millis(); is_long_press = false; }
     if (btn && (millis() - button_timer > 1000) && !is_long_press) {
-        for(int i=0; i<16; i++) seq_kick[i] = false; // Clear
+        for(int i=0; i<16; i++) seq_kick[i] = false; // Clear sequence
         is_long_press = true;
     }
     if (!btn && last_button_state == HIGH && !is_long_press) {
-        seq_kick[current_step] = !seq_kick[current_step]; // Toggle pas actuel
+        seq_kick[current_step] = !seq_kick[current_step]; // Toggle current step
     }
     last_button_state = btn;
 
-    // --- AFFICHAGE OLED ---
+    // --- OLED UI RENDERING ---
     u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x10_tr);
-    u8g2.drawStr(30, 10, "TR-DZ ULTIMATE");
-    u8g2.drawHLine(0, 14, 128);
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(32, 12, "TR-DZ V11 EN");
+    u8g2.drawHLine(0, 15, 128);
 
-    // Visualisation Peak
-    int bar = (int)(peak_level * 60.0f);
-    u8g2.drawBox(2, 45 - bar, 3, bar);
-    u8g2.drawBox(123, 45 - bar, 3, bar);
+    // Peak Meter Visualization
+    int bar_h = (int)(peak_level * 70.0f); if(bar_h > 35) bar_h = 35;
+    u8g2.drawBox(2, 50 - bar_h, 4, bar_h); u8g2.drawBox(122, 50 - bar_h, 4, bar_h); 
 
     u8g2.setCursor(10, 25); u8g2.print("BPM:"); u8g2.print((int)current_bpm);
-    u8g2.setCursor(70, 25); u8g2.print("CUT:"); u8g2.print((int)current_cutoff);
-    u8g2.setCursor(10, 37); u8g2.print("SWG:"); u8g2.print((int)(current_swing*100));
-    u8g2.setCursor(70, 37); u8g2.print("DCY:"); u8g2.print((int)(current_kick_decay*100));
+    u8g2.setCursor(70, 25); u8g2.print("FLT:"); u8g2.print((int)current_cutoff);
+    u8g2.setCursor(10, 35); u8g2.print("SWG:"); u8g2.print((int)(current_swing*100));
+    u8g2.setCursor(70, 35); u8g2.print("DCY:"); u8g2.print((int)(current_kick_decay*100));
 
-    // Grille Séquenceur
+    // Sequencer Grid
     for(int i=0; i<16; i++) {
         int x = i * 8;
-        u8g2.drawFrame(x + 1, 55, 6, 6);
-        if(seq_kick[i]) u8g2.drawBox(x + 2, 56, 4, 4);
-        if(i == current_step) u8g2.drawBox(x + 1, 51, 6, 2);
+        u8g2.drawFrame(x + 1, 56, 6, 6);
+        if(seq_kick[i]) u8g2.drawBox(x + 2, 57, 4, 4);
+        if(i == current_step) u8g2.drawBox(x + 1, 52, 6, 2);
     }
+    
     u8g2.sendBuffer();
 }
