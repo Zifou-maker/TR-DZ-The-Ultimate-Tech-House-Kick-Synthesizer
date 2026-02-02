@@ -1,4 +1,8 @@
+# Arduino/Daisy temporary files
 build/
 .vscode/
 *.bin
 *.elf
+*.map
+*.hex
+
