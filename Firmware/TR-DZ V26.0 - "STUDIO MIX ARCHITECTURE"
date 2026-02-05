@@ -1,0 +1,188 @@
+/* -------------------------------------------------------
+   TR-DZ V26.0 - "STUDIO MIX ARCHITECTURE"
+   - PROBLÈME RÉSOLU : Les Hats ne sont plus écrasés par la Basse.
+   - ARCHITECTURE : Séparation des Bus (Dirty Lows vs Clean Highs).
+   - HATS : Filtre HighPass simple (Clarté maximale).
+   -------------------------------------------------------
+*/
+
+#include "DaisyDuino.h"
+
+using namespace daisysp;
+
+// --- CONFIG HARDWARE ---
+const int MUX_S0 = 0, MUX_S1 = 1, MUX_S2 = 2, MUX_S3 = 3;
+const int MUX_SIG = A0; 
+
+static DaisyHardware hw;
+static Metro         metro;
+
+// --- MOTEURS DSP ---
+static Oscillator    osc_kick, osc_bass; 
+static AdEnv         env_amp_kick, env_pitch_kick, env_click, env_hat, env_clap;
+static WhiteNoise    noise_gen; 
+static Svf           filt_click, filt_hat, filt_clap, filt_bass;
+
+// --- SÉQUENCEUR ---
+int current_step = 0; 
+int selected_pattern = 0;
+const int NUM_PATTERNS = 5;
+
+bool pattern_kick[NUM_PATTERNS][16] = {
+    {1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0}, 
+    {1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,1}, 
+    {1,0,0,1, 0,0,1,0, 1,0,0,0, 1,0,0,0}, 
+    {1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,1,0}, 
+    {1,0,1,0, 1,0,1,0, 1,1,1,1, 1,1,1,1}  
+};
+bool pattern_clap[16] = {0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0};
+bool pattern_hat[16]  = {0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,0};
+
+// --- VARIABLES ---
+float tune_val, sidechain_val, decay_val, click_val, drive_val;
+float hat_val, clap_val, tech_factor;
+float last_values[16] = {0.0f};
+
+// --- FONCTIONS ---
+float readMux(int channel) {
+    digitalWrite(MUX_S0, (channel & 1) ? HIGH : LOW);
+    digitalWrite(MUX_S1, (channel & 2) ? HIGH : LOW);
+    digitalWrite(MUX_S2, (channel & 4) ? HIGH : LOW);
+    digitalWrite(MUX_S3, (channel & 8) ? HIGH : LOW);
+    delayMicroseconds(30); 
+    float newVal = analogRead(MUX_SIG) / 1023.0f;
+    if (abs(newVal - last_values[channel]) > 0.005f) last_values[channel] = newVal;
+    return last_values[channel];
+}
+
+float DirtyClip(float x, float drive) {
+    // Saturation sale pour la Basse et le Kick
+    x *= drive;
+    return tanhf(x); 
+}
+
+void AudioCallback(float **in, float **out, size_t size) {
+    for (size_t i = 0; i < size; i++) {
+        
+        if (metro.Process()) {
+            current_step = (current_step + 1) % 16;
+            if (pattern_kick[selected_pattern][current_step]) {
+                env_amp_kick.Trigger();
+                env_pitch_kick.Trigger();
+                env_click.Trigger();
+            }
+            if (pattern_clap[current_step]) env_clap.Trigger();
+            if (pattern_hat[current_step] || (tech_factor > 0.7f && current_step % 2 == 0)) env_hat.Trigger();
+        }
+
+        float noise = noise_gen.Process();
+
+        // --- BUS 1 : LOW END (Kick + Basse) ---
+        // Ce bus sera saturé pour donner du gras
+        
+        // 1. KICK (Hammer)
+        float env_p = env_pitch_kick.Process();
+        float env_a = env_amp_kick.Process();
+        osc_kick.SetFreq(38.0f + (env_p * env_p * env_p * 750.0f)); 
+        float sig_kick = osc_kick.Process() * env_a * 1.2f;
+        filt_click.Process(noise);
+        sig_kick += filt_click.High() * env_click.Process() * click_val * 0.8f;
+
+        // 2. BASS (Titanium Square)
+        osc_bass.SetFreq(36.0f + (tune_val * 40.0f)); 
+        float b_raw = osc_bass.Process();
+        b_raw = tanhf(b_raw * 2.5f); // Pre-distortion
+        filt_bass.SetFreq(100.0f + (tech_factor * 180.0f));
+        filt_bass.Process(b_raw);
+        float sig_bass = filt_bass.Low() * 2.0f;
+        float ducking = 1.0f - (env_a * sidechain_val);
+        if (ducking < 0.0f) ducking = 0.0f;
+        sig_bass *= (ducking * ducking);
+
+        // MIX LOW END + SATURATION
+        float low_end_mix = sig_kick + sig_bass;
+        // On sature UNIQUEMENT le grave.
+        float low_end_dirty = DirtyClip(low_end_mix, 1.0f + drive_val * 2.0f);
+
+
+        // --- BUS 2 : HIGH END (Hats + Clap) ---
+        // Ce bus reste PROPRE (Clean), il est additionné à la fin.
+        
+        // 3. CLAP (Natural)
+        filt_clap.Process(noise);
+        float sig_clap = filt_clap.Band() * env_clap.Process() * clap_val * 1.2f;
+
+        // 4. HATS (High Pass Crystal)
+        // Retour au simple High Pass, c'est ce qui marche le mieux pour la clarté
+        filt_hat.Process(noise); 
+        float sig_hat = filt_hat.High() * env_hat.Process() * hat_val * 0.8f;
+
+        // --- MASTER MIX ---
+        // On mélange le GRAS (Low End) avec le CRISTAL (High End)
+        // Sans les écraser l'un contre l'autre.
+        float final_out = low_end_dirty + sig_clap + sig_hat;
+
+        // Limiteur de sécurité final (très léger, juste pour pas clipper le convertisseur)
+        if (final_out > 0.9f) final_out = 0.9f;
+        if (final_out < -0.9f) final_out = -0.9f;
+
+        out[0][i] = final_out;
+        out[1][i] = final_out;
+    }
+}
+
+void setup() {
+    hw = DAISY.init(DAISY_SEED, AUDIO_SR_48K);
+    float sr = DAISY.get_samplerate();
+
+    pinMode(MUX_S0, OUTPUT); pinMode(MUX_S1, OUTPUT);
+    pinMode(MUX_S2, OUTPUT); pinMode(MUX_S3, OUTPUT);
+
+    // KICK
+    osc_kick.Init(sr); osc_kick.SetWaveform(Oscillator::WAVE_SIN);
+    env_pitch_kick.Init(sr); env_pitch_kick.SetTime(ADENV_SEG_ATTACK, 0.001f); env_pitch_kick.SetTime(ADENV_SEG_DECAY, 0.045f);
+    env_amp_kick.Init(sr); env_amp_kick.SetTime(ADENV_SEG_ATTACK, 0.002f); env_amp_kick.SetTime(ADENV_SEG_DECAY, 0.4f);
+    noise_gen.Init();
+    filt_click.Init(sr); filt_click.SetFreq(4000.0f);
+    env_click.Init(sr); env_click.SetTime(ADENV_SEG_DECAY, 0.008f);
+
+    // BASS
+    osc_bass.Init(sr); 
+    osc_bass.SetWaveform(Oscillator::WAVE_POLYBLEP_SQUARE);
+    filt_bass.Init(sr); filt_bass.SetRes(0.5f);
+
+    // HATS (High Pass Setup - "Tss" propre)
+    filt_hat.Init(sr); 
+    filt_hat.SetFreq(8000.0f); // Très haut pour ne garder que l'air
+    filt_hat.SetRes(0.1f);     // Pas de résonance = pas de sifflement "bizarre"
+    env_hat.Init(sr); env_hat.SetTime(ADENV_SEG_ATTACK, 0.002f); env_hat.SetTime(ADENV_SEG_DECAY, 0.06f);
+
+    // CLAP
+    filt_clap.Init(sr); 
+    filt_clap.SetFreq(1000.0f); 
+    filt_clap.SetRes(0.5f);
+    env_clap.Init(sr); env_clap.SetTime(ADENV_SEG_ATTACK, 0.001f); env_clap.SetTime(ADENV_SEG_DECAY, 0.15f);
+
+    metro.Init((126.0f / 60.0f) * 4.0f, sr); 
+
+    DAISY.begin(AudioCallback);
+}
+
+void loop() {
+    tune_val = readMux(0);
+    sidechain_val = readMux(1) * 1.5f;
+    decay_val = readMux(2);
+    env_amp_kick.SetTime(ADENV_SEG_DECAY, 0.15f + (decay_val * 0.6f));
+    
+    click_val = readMux(3);
+    drive_val = readMux(4);
+    selected_pattern = (int)(readMux(5) * (NUM_PATTERNS - 0.1f));
+    
+    hat_val = readMux(6);
+    env_hat.SetTime(ADENV_SEG_DECAY, 0.03f + (hat_val * 0.3f));
+    
+    clap_val = readMux(7);
+    tech_factor = readMux(8);
+
+    delay(10);
+}
